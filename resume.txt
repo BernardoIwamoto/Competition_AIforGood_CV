@@ -1,0 +1,20 @@
+Inicialmente, estamos lidando apenas com RGB. 
+
+Provavelmente, maior problema -> meadow x farm -- florest x farm -- solo exposto x talhoes claros
+
+Dataset grande (27k)
+
+Size 512 x 512
+
+Saida binária: 1 -> farm; 0 -> resto
+
+Vale a pena trabalhar com modelos maiores
+
+Loss acho que podemos fazer uma comboloss de dice com bcewith logits
+
+Augmentation: Random horizontal e vertical flip
+Rotation 360 graus
+Resize e random crop
+Gaussian noise
+Provavelmente, mudança de brilho, saturação e cpa contraste
+
