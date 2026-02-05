@@ -1,34 +1,31 @@
 import pandas as pd
-import os
+from pathlib import Path
 
-img_folders = ['GID-img-1', 'GID-img-2', 'GID-img-3', 'GID-img-4']
+base_path = Path("../data")
+
+img_folders = ['GID-img-1/1', 'GID-img-2/2', 'GID-img-3/3', 'GID-img-4/4']
 label_folder = 'GID-label'
 
 data_list = []
 
 for folder in img_folders:
-    if os.path.exists(folder):
-        print(folder)
-        files = os.listdir(folder)
-        print(files)
-        
-        for filename in files:
-            # tomara que o nome seja igual
-            img_path = os.path.join(folder, filename)
+    img_dir = base_path / folder
+    label_dir = base_path / label_folder
 
-            label_path = os.path.join(label_folder, filename)
+    if img_dir.exists():
+        for img_file in img_dir.iterdir():
 
-            #se encontrar a dupla, bota a dupla na lista
-            if os.path.exists(label_path):
-                data_list.append({
-                    'image_path': img_path,
-                    'label_path': label_path,
-                    'filename': filename,
-                    'folder': folder
-                })
-            
-            else:
-                print(f"nao encontrou o par da imagem: {img_path}")
+            if img_file.is_file() and img_file.suffix.lower() == '.jpg':
+                label_name = img_file.stem + ".png"
+                label_file = label_dir / label_name
+
+                if label_file.exists():
+                    data_list.append({
+                        'image_path': str(img_file),
+                        'label_path': str(label_file),
+                        'filename': img_file.name,
+                        'folder': folder
+                    })
 
 # cria o dataframe com as duplas encontradas
 df = pd.DataFrame(data_list)
