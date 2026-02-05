@@ -17,3 +17,8 @@ Rotation 360 graus
 Resize e random crop
 Gaussian noise
 Provavelmente, mudança de brilho, saturação e cpa contraste
+
+SegFormer me parece uma boa ideia -> encoder muito forte
+downsampling progressivo
+decoder mais fraco, nao tenta aprender nada. assim, nao gera ruido extra.
+consegue trabalhar bem com areas grandes 
