@@ -6,5 +6,5 @@ torchvision
 scikit-learn
 scipy
 tqdm
-albuntations
+albumentations
 matplotlib

@@ -1,2 +1,6 @@
 data/
 dataset_map.csv
+.venv/
+env/
+venv/
+__pycache__/
