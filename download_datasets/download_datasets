@@ -1,0 +1,202 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+import argparse
+import hashlib
+import os
+import sys
+import time
+import zipfile
+from urllib.parse import urlparse, parse_qs
+
+import requests
+
+
+DATASET_URLS = [
+    "https://download.scidb.cn/download?fileId=91ed6dd621759cee84e96d62947d2295&path=/V1/GID-label.zip&fileName=GID-label.zip",
+    "https://download.scidb.cn/download?fileId=cc33bef7ce7e3aed58265938c752cfef&path=/V1/GID-img-4.zip&fileName=GID-img-4.zip",
+    "https://download.scidb.cn/download?fileId=38b6c9b47a9dec442b5cb4751fe2b794&path=/V1/GID-img-2.zip&fileName=GID-img-2.zip",
+    "https://download.scidb.cn/download?fileId=ad14b75b62e8e84fb0f70c3fa917ad04&path=/V1/GID-img-3.zip&fileName=GID-img-3.zip",
+    "https://download.scidb.cn/download?fileId=1c1420488f6cfbf9e7bb5c3c9b342471&path=/V1/GID-img-1.zip&fileName=GID-img-1.zip",
+]
+
+
+def human_bytes(n: int) -> str:
+    units = ["B", "KB", "MB", "GB", "TB"]
+    f = float(n)
+    for u in units:
+        if f < 1024 or u == units[-1]:
+            return f"{f:.1f}{u}" if u != "B" else f"{int(f)}{u}"
+        f /= 1024.0
+    return f"{f:.1f}B"
+
+
+def guess_filename(url: str) -> str:
+    # usa fileName=... se existir
+    qs = parse_qs(urlparse(url).query)
+    if "fileName" in qs and qs["fileName"]:
+        return qs["fileName"][0]
+    # fallback: último segmento do path
+    path = urlparse(url).path
+    base = os.path.basename(path) or "download.bin"
+    return base
+
+
+def sha256_file(path: str, chunk_size: int = 1024 * 1024) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        while True:
+            b = f.read(chunk_size)
+            if not b:
+                break
+            h.update(b)
+    return h.hexdigest()
+
+
+def download_with_resume(
+    url: str,
+    out_path: str,
+    timeout: int = 60,
+    retries: int = 8,
+    backoff: float = 1.8,
+    chunk_size: int = 1024 * 1024,
+) -> None:
+    os.makedirs(os.path.dirname(out_path), exist_ok=True)
+
+    # tamanho já baixado (para retomar)
+    existing = os.path.getsize(out_path) if os.path.exists(out_path) else 0
+
+    headers = {}
+    if existing > 0:
+        headers["Range"] = f"bytes={existing}-"
+
+    attempt = 0
+    while True:
+        attempt += 1
+        try:
+            with requests.get(url, stream=True, headers=headers, timeout=timeout) as r:
+                # 416 = range inválido (arquivo completo já existe, ou servidor não aceita)
+                if r.status_code == 416:
+                    print(f"[OK] Já baixado (Range 416): {os.path.basename(out_path)}")
+                    return
+
+                r.raise_for_status()
+
+                # total do download (pode ser parcial se Range)
+                content_len = r.headers.get("Content-Length")
+                total_to_get = int(content_len) if content_len is not None else None
+
+                # se range foi aceito, o servidor pode responder 206
+                mode = "ab" if existing > 0 and r.status_code == 206 else "wb"
+                if mode == "wb" and existing > 0:
+                    # servidor não aceitou Range; recomeça do zero
+                    existing = 0
+
+                # tenta inferir total final se tiver Content-Range
+                total_final = None
+                cr = r.headers.get("Content-Range")  # ex: bytes 100-999/12345
+                if cr and "/" in cr:
+                    try:
+                        total_final = int(cr.split("/")[-1])
+                    except Exception:
+                        total_final = None
+                if total_final is None:
+                    total_final = (existing + total_to_get) if total_to_get is not None else None
+
+                start = time.time()
+                downloaded = existing
+
+                with open(out_path, mode) as f:
+                    last_print = 0.0
+                    for chunk in r.iter_content(chunk_size=chunk_size):
+                        if not chunk:
+                            continue
+                        f.write(chunk)
+                        downloaded += len(chunk)
+
+                        now = time.time()
+                        if now - last_print >= 0.3:
+                            last_print = now
+                            if total_final:
+                                pct = (downloaded / total_final) * 100.0
+                                speed = downloaded / max(1e-6, (now - start))
+                                sys.stdout.write(
+                                    f"\r[DL] {os.path.basename(out_path)} "
+                                    f"{pct:6.2f}% ({human_bytes(downloaded)}/{human_bytes(total_final)}) "
+                                    f"{human_bytes(int(speed))}/s"
+                                )
+                            else:
+                                sys.stdout.write(
+                                    f"\r[DL] {os.path.basename(out_path)} "
+                                    f"{human_bytes(downloaded)}"
+                                )
+                            sys.stdout.flush()
+
+                sys.stdout.write("\n")
+                print(f"[OK] Download concluído: {out_path}")
+                return
+
+        except Exception as e:
+            if attempt > retries:
+                raise RuntimeError(f"Falha após {retries} tentativas em {url}: {e}") from e
+
+            sleep_s = (backoff ** (attempt - 1))
+            print(f"[WARN] Erro no download ({attempt}/{retries}): {e}")
+            print(f"[INFO] Tentando novamente em {sleep_s:.1f}s...")
+            time.sleep(sleep_s)
+
+            # atualiza headers com Range de onde parou
+            existing = os.path.getsize(out_path) if os.path.exists(out_path) else 0
+            headers = {"Range": f"bytes={existing}-"} if existing > 0 else {}
+
+
+def unzip_if_needed(zip_path: str, out_dir: str) -> None:
+    if not zipfile.is_zipfile(zip_path):
+        print(f"[SKIP] Não parece ZIP válido: {zip_path}")
+        return
+    base = os.path.splitext(os.path.basename(zip_path))[0]
+    target_dir = os.path.join(out_dir, base)
+    os.makedirs(target_dir, exist_ok=True)
+    print(f"[UNZIP] Extraindo {os.path.basename(zip_path)} -> {target_dir}")
+    with zipfile.ZipFile(zip_path, "r") as z:
+        z.extractall(target_dir)
+    print(f"[OK] Extraído: {target_dir}")
+
+
+def main():
+    ap = argparse.ArgumentParser(
+        description="Baixa os zips do dataset GID (scidb.cn) com resume e extração opcional."
+    )
+    ap.add_argument("--out", default="./GID_dataset", help="Diretório de saída")
+    ap.add_argument("--unzip", action="store_true", help="Descompactar após baixar")
+    ap.add_argument("--timeout", type=int, default=60, help="Timeout por request (s)")
+    ap.add_argument("--retries", type=int, default=8, help="Tentativas por arquivo")
+    ap.add_argument("--sha256", action="store_true", help="Calcular SHA256 ao final (para auditoria)")
+    args = ap.parse_args()
+
+    os.makedirs(args.out, exist_ok=True)
+
+    for url in DATASET_URLS:
+        fname = guess_filename(url)
+        out_path = os.path.join(args.out, fname)
+
+        print(f"\n=== {fname} ===")
+        download_with_resume(
+            url=url,
+            out_path=out_path,
+            timeout=args.timeout,
+            retries=args.retries,
+        )
+
+        if args.sha256:
+            digest = sha256_file(out_path)
+            print(f"[SHA256] {fname}: {digest}")
+
+        if args.unzip:
+            unzip_if_needed(out_path, args.out)
+
+    print("\nTudo pronto.")
+
+
+if __name__ == "__main__":
+    main()
