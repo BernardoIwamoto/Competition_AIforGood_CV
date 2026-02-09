@@ -30,7 +30,7 @@ for folder in img_folders:
 # cria o dataframe com as duplas encontradas
 df = pd.DataFrame(data_list)
 
-df.to_csv("dataset_map.csv")
+df.to_csv("data/dataset_map.csv")
 
 df.head()  
 
