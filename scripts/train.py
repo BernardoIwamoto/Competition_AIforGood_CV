@@ -110,6 +110,14 @@ def main():
 
             with amp.autocast(device_type=device_type, dtype=torch.float16):
                 outputs = model(images)
+                if outputs.shape[-2:] != masks.shape[-2:]:
+                    outputs = torch.nn.functional.interpolate(
+                        outputs,
+                        size=masks.shape[-2:],
+                        mode="bilinear",
+                        align_corners=False
+                    )
+
                 loss = criterion(outputs, masks)
 
             scaler.scale(loss).backward()
