@@ -1,106 +1,183 @@
+import argparse
 from pathlib import Path
 import torch
 import torch.nn as nn
+from torch import amp
 
 from src.data_loader.loaders import create_dataloaders
 from src.models.unet_baseline import UNetSmall
+from src.models.segformer_model import SegFormerModel
 from src.utils.metrics import iou_score, dice_score
-
-DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-
-# DATALOADERS
-train_loader, val_loader = create_dataloaders(
-    "data/train.csv",
-    "data/val.csv",
-    batch_size=8,
-    num_workers=0
-)
-
-# MODELO
-model = UNetSmall().to(DEVICE)
-criterion = nn.BCEWithLogitsLoss()
-optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
-
-# CHECKPOINTS
-checkpoint_dir = Path("checkpoints")
-checkpoint_dir.mkdir(exist_ok=True)
-
-save_every = 5
-num_epochs = 50
+from src.utils.losses import BCEDiceLoss
 
 
-# TREINAMENTO
-for epoch in range(num_epochs):
-    #TREINO
-    model.train()
-    running_loss = 0.0
+# =====================================================
+# ARGUMENTOS DE LINHA DE COMANDO
+# =====================================================
+def parse_args():
+    parser = argparse.ArgumentParser()
 
-    for images, masks in train_loader:
-        images = images.to(DEVICE)
-        masks = masks.to(DEVICE)
+    parser.add_argument("--model", type=str, default="unet",
+                        choices=["unet", "segformer"])
 
-        optimizer.zero_grad()
-        outputs = model(images)
-        loss = criterion(outputs, masks)
+    parser.add_argument("--resume", type=str, default=None)
 
-        loss.backward()
-        optimizer.step()
+    parser.add_argument("--epochs", type=int, default=50)
 
-        running_loss += loss.item()
+    parser.add_argument("--batch_size", type=int, default=8)
 
-    train_loss = running_loss / len(train_loader)
+    parser.add_argument("--num_workers", type=int, default=0)
 
-    # VALIDAÇÃO
-    model.eval()
-    val_iou = 0.0
-    val_dice = 0.0
+    return parser.parse_args()
 
-    with torch.no_grad():
-        for images, masks in val_loader:
+
+# =====================================================
+# MAIN
+# =====================================================
+def main():
+    args = parse_args()
+
+    DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+    print(f"Usando dispositivo: {DEVICE}")
+    print(f"Modelo escolhido: {args.model}")
+
+    # =====================================================
+    # DATALOADERS
+    # =====================================================
+    train_loader, val_loader = create_dataloaders(
+        "data/train.csv",
+        "data/val.csv",
+        batch_size=args.batch_size,
+        num_workers=args.num_workers
+    )
+
+    # =====================================================
+    # MODELO
+    # =====================================================
+    if args.model == "unet":
+        model = UNetSmall().to(DEVICE)
+
+    elif args.model == "segformer":
+        model = SegFormerModel(num_classes=1).to(DEVICE)
+
+    criterion = BCEDiceLoss()
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+    scaler = amp.GradScaler("cuda" if torch.cuda.is_available() else "cpu")
+
+    # =====================================================
+    # CHECKPOINTS
+    # =====================================================
+    checkpoint_dir = Path("checkpoints") / args.model
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    checkpoint_dir.mkdir(exist_ok=True)
+
+    start_epoch = 0
+    best_iou = 0.0
+
+    # =====================================================
+    # RESUME (se fornecido)
+    # =====================================================
+    if args.resume is not None:
+        checkpoint = torch.load(args.resume, map_location=DEVICE)
+
+        model.load_state_dict(checkpoint["model_state"])
+        optimizer.load_state_dict(checkpoint["optimizer_state"])
+
+        start_epoch = checkpoint["epoch"]
+        best_iou = checkpoint.get("val_iou", 0.0)
+
+        print(f"Retomando treino do epoch {start_epoch}")
+        print(f"Melhor IoU anterior: {best_iou:.4f}")
+    else:
+        print("Treinando do zero.")
+
+    # =====================================================
+    # TREINAMENTO
+    # =====================================================
+    for epoch in range(start_epoch, args.epochs):
+
+        # ----------------- TREINO -----------------
+        model.train()
+        running_loss = 0.0
+
+        for images, masks in train_loader:
             images = images.to(DEVICE)
             masks = masks.to(DEVICE)
 
-            preds = model(images)
+            device_type = "cuda" if torch.cuda.is_available() else "cpu"
 
-            val_iou += iou_score(preds, masks).item()
-            val_dice += dice_score(preds, masks).item()
+            optimizer.zero_grad()
 
-    val_iou /= len(val_loader)
-    val_dice /= len(val_loader)
+            with amp.autocast(device_type=device_type, dtype=torch.float16):
+                outputs = model(images)
+                loss = criterion(outputs, masks)
 
-    # LOG 
-    print(
-        f"Epoch {epoch:03d} | "
-        f"Train Loss: {train_loss:.4f} | "
-        f"Val IoU: {val_iou:.4f} | "
-        f"Val Dice: {val_dice:.4f}"
+            scaler.scale(loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
+
+            running_loss += loss.item()
+
+        train_loss = running_loss / len(train_loader)
+
+        # ----------------- VALIDAÇÃO -----------------
+        model.eval()
+        val_iou = 0.0
+        val_dice = 0.0
+
+        with torch.no_grad():
+            for images, masks in val_loader:
+                images = images.to(DEVICE)
+                masks = masks.to(DEVICE)
+
+                preds = model(images)
+
+                val_iou += iou_score(preds, masks).item()
+                val_dice += dice_score(preds, masks).item()
+
+        val_iou /= len(val_loader)
+        val_dice /= len(val_loader)
+
+        print(
+            f"Epoch {epoch:03d} | "
+            f"Train Loss: {train_loss:.4f} | "
+            f"Val IoU: {val_iou:.4f} | "
+            f"Val Dice: {val_dice:.4f}"
+        )
+
+        # ----------------- SALVAR MELHOR MODELO -----------------
+        if val_iou > best_iou:
+            best_iou = val_iou
+
+            best_path = checkpoint_dir / "best_model.pth"
+            torch.save(
+                {
+                    "epoch": epoch + 1,
+                    "model_state": model.state_dict(),
+                    "optimizer_state": optimizer.state_dict(),
+                    "val_iou": val_iou,
+                },
+                best_path,
+            )
+
+            print(f"🔥 Novo melhor modelo salvo (IoU={val_iou:.4f})")
+
+    # =====================================================
+    # SALVAR MODELO FINAL
+    # =====================================================
+    final_path = checkpoint_dir / "model_last.pth"
+    torch.save(
+        {
+            "epoch": args.epochs,
+            "model_state": model.state_dict(),
+            "optimizer_state": optimizer.state_dict(),
+        },
+        final_path,
     )
 
-    # CHECKPOINT
-    if (epoch + 1) % save_every == 0:
-        checkpoint_path = checkpoint_dir / f"model_epoch_{epoch+1}.pth"
-        torch.save(
-            {
-                "epoch": epoch + 1,
-                "model_state": model.state_dict(),
-                "optimizer_state": optimizer.state_dict(),
-                "train_loss": train_loss,
-                "val_iou": val_iou,
-                "val_dice": val_dice,
-            },
-            checkpoint_path,
-        )
-        print(f"Checkpoint salvo em {checkpoint_path}")
+    print(f"Modelo final salvo em {final_path}")
 
-# SALVA MODELO FINAL
-final_path = checkpoint_dir / "model_last.pth"
-torch.save(
-    {
-        "epoch": num_epochs,
-        "model_state": model.state_dict(),
-        "optimizer_state": optimizer.state_dict(),
-    },
-    final_path,
-)
 
-print(f"Modelo final salvo em {final_path}")
+# =====================================================
+if __name__ == "__main__":
+    main()
