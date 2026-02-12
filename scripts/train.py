@@ -140,6 +140,14 @@ def main():
 
                 preds = model(images)
 
+                if preds.shape[-2:] != masks.shape[-2:]:
+                    preds = torch.nn.functional.interpolate(
+                        preds,
+                        size=masks.shape[-2:],
+                        mode="bilinear",
+                        align_corners=False
+                    )
+
                 val_iou += iou_score(preds, masks).item()
                 val_dice += dice_score(preds, masks).item()
 
