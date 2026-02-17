@@ -18,7 +18,7 @@ def parse_args():
     parser = argparse.ArgumentParser()
 
     parser.add_argument("--model", type=str, default="unet",
-                        choices=["unet", "segformer"])
+                        choices=["unet", "segformer_b0", "segformer_b2"],)
 
     parser.add_argument("--resume", type=str, default=None)
 
@@ -57,8 +57,11 @@ def main():
     if args.model == "unet":
         model = UNetSmall().to(DEVICE)
 
-    elif args.model == "segformer":
-        model = SegFormerModel(num_classes=1).to(DEVICE)
+    elif args.model == "segformer_b0":
+        model = SegFormerModel(num_classes=1, model_name="segformer_b0").to(DEVICE)
+
+    elif args.model == "segformer_b2":
+        model = SegFormerModel(num_classes=1, model_name="segformer_b2").to(DEVICE)
 
     criterion = BCEDiceLoss()
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)

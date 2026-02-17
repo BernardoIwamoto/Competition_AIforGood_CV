@@ -2,6 +2,7 @@ import torch
 import matplotlib.pyplot as plt
 
 from src.data_loader.loaders import create_dataloaders
+from src.models.segformer_model import SegFormerModel
 from src.models.unet_baseline import UNetSmall
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
@@ -13,8 +14,10 @@ train_loader, val_loader = create_dataloaders(
     num_workers=0
 )
 
-model = UNetSmall().to(DEVICE)
-model.load_state_dict(torch.load("baseline.pth", map_location=DEVICE))
+model = SegFormerModel(num_classes=1).to(DEVICE)
+model.load_state_dict(
+    torch.load("checkpoints/segformer_b0/best_model.pth", map_location=DEVICE)
+)
 model.eval()
 
 images, masks = next(iter(val_loader))
