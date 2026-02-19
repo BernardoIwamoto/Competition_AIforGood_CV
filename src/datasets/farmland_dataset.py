@@ -8,8 +8,10 @@ from src.utils.mask_utils import rgb_mask_to_binary
 
 
 class FarmlandDataset(Dataset):
-    def __init__(self, csv_path, transform=None):
+    def __init__(self, csv_path, transform=None, limit=None):
         self.df = pd.read_csv(csv_path)
+        if limit:
+            self.df = self.df.iloc[:limit]
         self.transform = transform
 
     def __len__(self):

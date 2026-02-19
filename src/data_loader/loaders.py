@@ -6,16 +6,21 @@ def create_dataloaders(
     train_csv,
     val_csv,
     batch_size=8,
-    num_workers=4
+    num_workers=4,
+    debug=False
 ):
+    limit = 50 if debug else None
+
     train_dataset = FarmlandDataset(
         csv_path=train_csv,
-        transform=get_train_transforms()
+        transform=get_train_transforms(),
+        limit=limit
     )
 
     val_dataset = FarmlandDataset(
         csv_path=val_csv,
-        transform=get_val_transforms()
+        transform=get_val_transforms(),
+        limit=limit
     )
 
     train_loader = DataLoader(

@@ -2,7 +2,11 @@ import argparse
 from pathlib import Path
 import torch
 import torch.nn as nn
+import sys
 from torch import amp
+
+# Add project root to sys.path to allow importing from src
+sys.path.append(str(Path(__file__).parent.parent))
 
 from src.data_loader.loaders import create_dataloaders
 from src.models.unet_baseline import UNetSmall
@@ -18,7 +22,7 @@ def parse_args():
     parser = argparse.ArgumentParser()
 
     parser.add_argument("--model", type=str, default="unet",
-                        choices=["unet", "segformer_b0", "segformer_b2"],)
+                        choices=["unet", "segformer_b0", "segformer_b2", "swin"],)
 
     parser.add_argument("--resume", type=str, default=None)
 
@@ -27,6 +31,8 @@ def parse_args():
     parser.add_argument("--batch_size", type=int, default=8)
 
     parser.add_argument("--num_workers", type=int, default=0)
+
+    parser.add_argument("--debug", action="store_true", help="Run in debug mode (fewer steps/images)")
 
     return parser.parse_args()
 
@@ -37,7 +43,12 @@ def parse_args():
 def main():
     args = parse_args()
 
-    DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+    if torch.cuda.is_available():
+        DEVICE = "cuda"
+    elif torch.backends.mps.is_available():
+        DEVICE = "mps"
+    else:
+        DEVICE = "cpu"
     print(f"Usando dispositivo: {DEVICE}")
     print(f"Modelo escolhido: {args.model}")
 
@@ -48,7 +59,8 @@ def main():
         "data/train.csv",
         "data/val.csv",
         batch_size=args.batch_size,
-        num_workers=args.num_workers
+        num_workers=args.num_workers,
+        debug=args.debug
     )
 
     # =====================================================
@@ -62,10 +74,28 @@ def main():
 
     elif args.model == "segformer_b2":
         model = SegFormerModel(num_classes=1, model_name="segformer_b2").to(DEVICE)
+    
+    elif args.model == "swin":
+        from src.models.swin_model import SwinTransformerUNet
+        model = SwinTransformerUNet(num_classes=1).to(DEVICE)
 
     criterion = BCEDiceLoss()
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
-    scaler = amp.GradScaler("cuda" if torch.cuda.is_available() else "cpu")
+    # GradScaler for AMP (Automatic Mixed Precision)
+    # Note: For MPS in earlier versions, GradScaler might default to CUDA behavior.
+    # In newer PyTorch versions (2.4+), it supports 'device' or detects it.
+    if DEVICE == "cuda":
+        scaler = amp.GradScaler("cuda")
+    elif DEVICE == "mps":
+        # MPS supports AMP but GradScaler depends on version. 
+        # For safety in mixed environments, we init with default 'cuda' if not specified, 
+        # but modern torch.amp.GradScaler('mps') is preferred if available.
+        try:
+             scaler = amp.GradScaler("mps")
+        except:
+             scaler = amp.GradScaler() # Fallback
+    else:
+        scaler = amp.GradScaler("cpu")
 
     # =====================================================
     # CHECKPOINTS
@@ -103,15 +133,28 @@ def main():
         model.train()
         running_loss = 0.0
 
-        for images, masks in train_loader:
+        for i, (images, masks) in enumerate(train_loader):
             images = images.to(DEVICE)
             masks = masks.to(DEVICE)
+            
+            optimizer.zero_grad(set_to_none=True)
 
-            device_type = "cuda" if torch.cuda.is_available() else "cpu"
+            if i % 10 == 0:
+                print(f"Epoch {epoch+1}/{args.epochs} - Batch {i}/{len(train_loader)}", end='\r')
 
-            optimizer.zero_grad()
+            # Determine device_type for autocast
 
-            with amp.autocast(device_type=device_type, dtype=torch.float16):
+            if DEVICE == "cuda":
+                autocast_device = "cuda"
+                autocast_dtype = torch.float16
+            elif DEVICE == "mps":
+                autocast_device = "mps"
+                autocast_dtype = torch.float16 # or torch.bfloat16 depending on preference
+            else:
+                autocast_device = "cpu"
+                autocast_dtype = torch.bfloat16 # data type for cpu
+
+            with amp.autocast(device_type=autocast_device, dtype=autocast_dtype):
                 outputs = model(images)
                 if outputs.shape[-2:] != masks.shape[-2:]:
                     outputs = torch.nn.functional.interpolate(
