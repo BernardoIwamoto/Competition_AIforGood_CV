@@ -22,7 +22,7 @@ def parse_args():
     parser = argparse.ArgumentParser()
 
     parser.add_argument("--model", type=str, default="unet",
-                        choices=["unet", "segformer_b0", "segformer_b2", "swin"],)
+                        choices=["unet", "segformer_b0", "segformer_b2", "swin", "deeplab"],)
 
     parser.add_argument("--resume", type=str, default=None)
 
@@ -78,6 +78,10 @@ def main():
     elif args.model == "swin":
         from src.models.swin_model import SwinTransformerUNet
         model = SwinTransformerUNet(num_classes=1).to(DEVICE)
+
+    elif args.model == "deeplab":
+        from src.models.deeplabv3plus_model import DeepLabV3PlusModel
+        model = DeepLabV3PlusModel(encoder_name="resnet50").to(DEVICE)
 
     criterion = BCEDiceLoss()
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
