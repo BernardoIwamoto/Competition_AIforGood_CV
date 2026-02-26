@@ -80,7 +80,7 @@ def main():
         model = SwinTransformerUNet(num_classes=1).to(DEVICE)
 
     criterion = BCEDiceLoss()
-    optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
     # GradScaler for AMP (Automatic Mixed Precision)
     # Note: For MPS in earlier versions, GradScaler might default to CUDA behavior.
     # In newer PyTorch versions (2.4+), it supports 'device' or detects it.
@@ -167,6 +167,10 @@ def main():
                 loss = criterion(outputs, masks)
 
             scaler.scale(loss).backward()
+            # necessário para AMP
+            scaler.unscale_(optimizer)
+            # gradient clipping
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             scaler.step(optimizer)
             scaler.update()
 
