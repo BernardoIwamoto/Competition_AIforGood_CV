@@ -15,9 +15,7 @@ from src.utils.metrics import iou_score, dice_score
 from src.utils.losses import BCEDiceLoss
 
 
-# =====================================================
 # ARGUMENTOS DE LINHA DE COMANDO
-# =====================================================
 def parse_args():
     parser = argparse.ArgumentParser()
 
@@ -37,9 +35,7 @@ def parse_args():
     return parser.parse_args()
 
 
-# =====================================================
 # MAIN
-# =====================================================
 def main():
     args = parse_args()
 
@@ -52,9 +48,7 @@ def main():
     print(f"Usando dispositivo: {DEVICE}")
     print(f"Modelo escolhido: {args.model}")
 
-    # =====================================================
     # DATALOADERS
-    # =====================================================
     train_loader, val_loader = create_dataloaders(
         "data/train.csv",
         "data/val.csv",
@@ -63,9 +57,7 @@ def main():
         debug=args.debug
     )
 
-    # =====================================================
     # MODELO
-    # =====================================================
     if args.model == "unet":
         model = UNetSmall().to(DEVICE)
 
@@ -74,7 +66,7 @@ def main():
 
     elif args.model == "segformer_b2":
         model = SegFormerModel(num_classes=1, model_name="segformer_b2").to(DEVICE)
-    
+
     elif args.model == "swin":
         from src.models.swin_model import SwinTransformerUNet
         model = SwinTransformerUNet(num_classes=1).to(DEVICE)
@@ -84,41 +76,51 @@ def main():
         model = DeepLabV3PlusModel(encoder_name="resnet50").to(DEVICE)
 
     criterion = BCEDiceLoss()
-    optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
-    # GradScaler for AMP (Automatic Mixed Precision)
-    # Note: For MPS in earlier versions, GradScaler might default to CUDA behavior.
-    # In newer PyTorch versions (2.4+), it supports 'device' or detects it.
+    
+    # Optimizer with different learning rates (your version)
+    optimizer = torch.optim.AdamW([
+        {"params": model.encoder.parameters(), "lr": 1e-5},   # backbone pré-treinado: LR baixo
+        {"params": model.dec4.parameters(), "lr": 1e-4},
+        {"params": model.dec3.parameters(), "lr": 1e-4},
+        {"params": model.dec2.parameters(), "lr": 1e-4},
+        {"params": model.dec1.parameters(), "lr": 1e-4},
+        {"params": model.final_conv.parameters(), "lr": 1e-4},
+    ], weight_decay=1e-2)
+
+    # Scheduler (your version)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+        optimizer,
+        T_max=args.epochs,
+        eta_min=1e-6  # não deixa o LR zerar completamente
+    )
+
+    # GradScaler for AMP (from remote, but adapted)
     if DEVICE == "cuda":
         scaler = amp.GradScaler("cuda")
     elif DEVICE == "mps":
-        # MPS supports AMP but GradScaler depends on version. 
-        # For safety in mixed environments, we init with default 'cuda' if not specified, 
-        # but modern torch.amp.GradScaler('mps') is preferred if available.
         try:
-             scaler = amp.GradScaler("mps")
+            scaler = amp.GradScaler("mps")
         except:
-             scaler = amp.GradScaler() # Fallback
+            scaler = amp.GradScaler()  # Fallback
     else:
         scaler = amp.GradScaler("cpu")
 
-    # =====================================================
     # CHECKPOINTS
-    # =====================================================
     checkpoint_dir = Path("checkpoints") / args.model
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
-    checkpoint_dir.mkdir(exist_ok=True)
 
     start_epoch = 0
     best_iou = 0.0
 
-    # =====================================================
     # RESUME (se fornecido)
-    # =====================================================
     if args.resume is not None:
         checkpoint = torch.load(args.resume, map_location=DEVICE)
 
         model.load_state_dict(checkpoint["model_state"])
         optimizer.load_state_dict(checkpoint["optimizer_state"])
+
+        if "scheduler_state" in checkpoint:
+            scheduler.load_state_dict(checkpoint["scheduler_state"])
 
         start_epoch = checkpoint["epoch"]
         best_iou = checkpoint.get("val_iou", 0.0)
@@ -128,9 +130,7 @@ def main():
     else:
         print("Treinando do zero.")
 
-    # =====================================================
     # TREINAMENTO
-    # =====================================================
     for epoch in range(start_epoch, args.epochs):
 
         # ----------------- TREINO -----------------
@@ -140,23 +140,22 @@ def main():
         for i, (images, masks) in enumerate(train_loader):
             images = images.to(DEVICE)
             masks = masks.to(DEVICE)
-            
+
             optimizer.zero_grad(set_to_none=True)
 
             if i % 10 == 0:
                 print(f"Epoch {epoch+1}/{args.epochs} - Batch {i}/{len(train_loader)}", end='\r')
 
             # Determine device_type for autocast
-
             if DEVICE == "cuda":
                 autocast_device = "cuda"
                 autocast_dtype = torch.float16
             elif DEVICE == "mps":
                 autocast_device = "mps"
-                autocast_dtype = torch.float16 # or torch.bfloat16 depending on preference
+                autocast_dtype = torch.float16
             else:
                 autocast_device = "cpu"
-                autocast_dtype = torch.bfloat16 # data type for cpu
+                autocast_dtype = torch.bfloat16
 
             with amp.autocast(device_type=autocast_device, dtype=autocast_dtype):
                 outputs = model(images)
@@ -215,6 +214,8 @@ def main():
             f"Val Dice: {val_dice:.4f}"
         )
 
+        scheduler.step()
+
         # ----------------- SALVAR MELHOR MODELO -----------------
         if val_iou > best_iou:
             best_iou = val_iou
@@ -225,6 +226,7 @@ def main():
                     "epoch": epoch + 1,
                     "model_state": model.state_dict(),
                     "optimizer_state": optimizer.state_dict(),
+                    "scheduler_state": scheduler.state_dict(),
                     "val_iou": val_iou,
                 },
                 best_path,
@@ -232,15 +234,14 @@ def main():
 
             print(f"🔥 Novo melhor modelo salvo (IoU={val_iou:.4f})")
 
-    # =====================================================
     # SALVAR MODELO FINAL
-    # =====================================================
     final_path = checkpoint_dir / "model_last.pth"
     torch.save(
         {
             "epoch": args.epochs,
             "model_state": model.state_dict(),
             "optimizer_state": optimizer.state_dict(),
+            "scheduler_state": scheduler.state_dict(),
         },
         final_path,
     )
